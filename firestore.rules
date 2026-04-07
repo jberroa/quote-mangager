@@ -1,0 +1,68 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: clients
+    // Fields: hospitalName, location, directorName, email, pinCode, createdAt, createdBy
+    //
+    // Collection: quotes
+    // Fields: clientId, selectedModuleIds, totalMonthlyCost, oneTimeFee, status, createdAt, createdBy, viewCount, lastViewed
+    //
+    // Collection: users (ID is email)
+    // Fields: name, email, role, createdAt
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.token.email.lower())).data;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.email.lower() == "elmejor15@gmail.com" || 
+         request.auth.token.email.lower() == "regis@acejan.com" || 
+         (exists(/databases/$(database)/documents/users/$(request.auth.token.email.lower())) && 
+          getUserData().role == 'admin'));
+    }
+
+    function isSalesRep() {
+      return isAuthenticated() && 
+        (isAdmin() || 
+         (exists(/databases/$(database)/documents/users/$(request.auth.token.email.lower())) && 
+          getUserData().role == 'sales_rep'));
+    }
+
+    // Users: Only admins can manage. Users can read their own data.
+    // Allow public read for PIN verification (querying by pinCode)
+    match /users/{email} {
+      allow read: if true; 
+      allow write: if isAdmin();
+    }
+
+    // Modules: Only admins can manage.
+    match /modules/{moduleId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Clients: Admins and Sales Reps can manage. Public can create via registration.
+    match /clients/{clientId} {
+      allow read: if true; 
+      allow create: if true; 
+      allow update, delete: if true; // Relaxed for prototype to allow PIN-logged-in users
+    }
+
+    // Quotes: Only admins and sales reps can manage. Client can read and increment view count.
+    match /quotes/{quoteId} {
+      allow read: if true;
+      allow update: if true; // Relaxed for prototype
+      allow create, delete: if true; // Relaxed for prototype
+    }
+  }
+}

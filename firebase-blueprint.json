@@ -1,0 +1,79 @@
+{
+  "entities": {
+    "Client": {
+      "title": "Client",
+      "description": "A hospital or facility client profile",
+      "type": "object",
+      "properties": {
+        "hospitalName": { "type": "string", "description": "Name of the hospital" },
+        "location": { "type": "string", "description": "Physical location/city" },
+        "directorName": { "type": "string", "description": "Name of the director or key contact" },
+        "email": { "type": "string", "format": "email", "description": "Contact email" },
+        "pinCode": { "type": "string", "description": "Unique 4-6 digit access PIN" },
+        "createdBy": { "type": "string", "description": "UID of the user who created this client" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" }
+      },
+      "required": ["hospitalName", "pinCode"]
+    },
+    "User": {
+      "title": "User",
+      "description": "System user (Admin or Sales Rep)",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["admin", "sales_rep"] },
+        "name": { "type": "string" }
+      },
+      "required": ["email", "role"]
+    },
+    "Module": {
+      "title": "Module",
+      "description": "ITRAK Module definition",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "category": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "monthlyCost": { "type": "number" },
+        "setupFee": { "type": "number" },
+        "isIncluded": { "type": "boolean" }
+      },
+      "required": ["id", "name", "monthlyCost"]
+    },
+    "Quote": {
+      "title": "Quote",
+      "description": "A personalized quote for a client",
+      "type": "object",
+      "properties": {
+        "clientId": { "type": "string", "description": "Reference to the client ID" },
+        "selectedModuleIds": { "type": "array", "items": { "type": "string" }, "description": "List of module IDs included in the quote" },
+        "totalMonthlyCost": { "type": "number", "description": "Calculated monthly cost" },
+        "oneTimeFee": { "type": "number", "description": "Calculated one-time setup fee" },
+        "status": { "type": "string", "enum": ["draft", "sent"], "description": "Quote status" },
+        "viewCount": { "type": "number", "description": "Number of times the quote was viewed" },
+        "lastViewed": { "type": "string", "format": "date-time", "description": "Last view timestamp" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" }
+      },
+      "required": ["clientId", "selectedModuleIds"]
+    }
+  },
+  "firestore": {
+    "/clients/{clientId}": {
+      "schema": "Client",
+      "description": "Client profiles"
+    },
+    "/quotes/{quoteId}": {
+      "schema": "Quote",
+      "description": "Personalized quotes"
+    },
+    "/modules/{moduleId}": {
+      "schema": "Module",
+      "description": "ITRAK Module definitions"
+    },
+    "/users/{email}": {
+      "schema": "User",
+      "description": "System users"
+    }
+  }
+}
