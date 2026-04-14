@@ -64,5 +64,15 @@ service cloud.firestore {
       allow update: if true; // Relaxed for prototype
       allow create, delete: if true; // Relaxed for prototype
     }
+
+    // Feedback: Clients can create, admins can read.
+    match /feedback/{feedbackId} {
+      allow read: if isAdmin();
+      allow create: if request.resource.data.keys().hasAll(['quoteId', 'message', 'createdAt']) &&
+                       request.resource.data.quoteId is string &&
+                       request.resource.data.message is string &&
+                       request.resource.data.message.size() > 0 &&
+                       request.resource.data.message.size() < 5000;
+    }
   }
 }

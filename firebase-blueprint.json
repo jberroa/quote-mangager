@@ -37,7 +37,8 @@
         "description": { "type": "string" },
         "monthlyCost": { "type": "number" },
         "setupFee": { "type": "number" },
-        "isIncluded": { "type": "boolean" }
+        "isIncluded": { "type": "boolean" },
+        "pdfUrl": { "type": "string", "description": "URL to the information PDF in Firebase Storage" }
       },
       "required": ["id", "name", "monthlyCost"]
     },
@@ -56,6 +57,20 @@
         "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" }
       },
       "required": ["clientId", "selectedModuleIds"]
+    },
+    "Feedback": {
+      "title": "Feedback",
+      "description": "Feedback provided by clients on proposals",
+      "type": "object",
+      "properties": {
+        "quoteId": { "type": "string", "description": "Reference to the quote ID" },
+        "clientId": { "type": "string", "description": "Reference to the client ID" },
+        "clientName": { "type": "string", "description": "Name of the hospital/client" },
+        "message": { "type": "string", "description": "Feedback message" },
+        "rating": { "type": "number", "description": "Optional rating (1-5)" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Timestamp of feedback" }
+      },
+      "required": ["quoteId", "message", "createdAt"]
     }
   },
   "firestore": {
@@ -74,6 +89,10 @@
     "/users/{email}": {
       "schema": "User",
       "description": "System users"
+    },
+    "/feedback/{feedbackId}": {
+      "schema": "Feedback",
+      "description": "Client feedback on proposals"
     }
   }
 }

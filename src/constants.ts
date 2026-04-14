@@ -6,6 +6,7 @@ export interface ITRAKModule {
   monthlyCost: number;
   isIncluded?: boolean;
   setupFee?: number;
+  pdfUrl?: string;
 }
 
 export const ITRAK_MODULES: ITRAKModule[] = [

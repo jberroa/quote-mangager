@@ -6,6 +6,7 @@ import {
 import { 
   getFirestore, collection, doc, setDoc, getDoc, getDocs, query, where, onSnapshot, addDoc, updateDoc, deleteDoc, Timestamp 
 } from 'firebase/firestore';
+import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject, uploadBytesResumable } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 
 export enum OperationType {
@@ -39,6 +40,7 @@ export interface FirestoreErrorInfo {
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
+export const storage = getStorage(app);
 
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
   const errInfo: FirestoreErrorInfo = {
@@ -68,5 +70,6 @@ export { firebaseConfig };
 
 export { 
   collection, doc, setDoc, getDoc, getDocs, query, where, onSnapshot, addDoc, updateDoc, deleteDoc, Timestamp,
-  signOut, signInWithEmailAndPassword, createUserWithEmailAndPassword
+  signOut, signInWithEmailAndPassword, createUserWithEmailAndPassword,
+  ref, uploadBytes, getDownloadURL, deleteObject, uploadBytesResumable
 };

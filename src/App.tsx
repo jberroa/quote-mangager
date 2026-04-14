@@ -1,8 +1,9 @@
 import React, { useState, useEffect, Component } from 'react';
 import { 
-  auth, db, signOut,
+  auth, db, signOut, storage,
   collection, doc, setDoc, getDoc, getDocs, query, where, onSnapshot, addDoc, updateDoc, deleteDoc, Timestamp,
   signInWithEmailAndPassword, createUserWithEmailAndPassword, firebaseConfig,
+  ref, uploadBytes, getDownloadURL, deleteObject, uploadBytesResumable,
   handleFirestoreError, OperationType
 } from './firebase';
 import { initializeApp, getApps } from 'firebase/app';
@@ -13,7 +14,8 @@ import {
   LayoutDashboard, Users, FileText, Plus, LogOut, 
   ShieldCheck, MapPin, User, Mail, Lock, CheckCircle2, 
   ArrowRight, BarChart3, Info, Calendar, Send, Trash2,
-  ChevronRight, Download, ExternalLink, Menu, X
+  ChevronRight, Download, ExternalLink, Menu, X, FileUp, FileDown, Eye,
+  MessageSquare, Star
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
@@ -52,6 +54,16 @@ interface SystemUser {
   role: 'admin' | 'sales_rep';
   name: string;
   pinCode?: string;
+}
+
+interface Feedback {
+  id: string;
+  quoteId: string;
+  clientId: string;
+  clientName: string;
+  message: string;
+  rating?: number;
+  createdAt: any;
 }
 
 // --- Components ---
@@ -117,7 +129,8 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [modules, setModules] = useState<ITRAKModule[]>([]);
   const [team, setTeam] = useState<SystemUser[]>([]);
-  const [activeTab, setActiveTab] = useState<'clients' | 'quotes' | 'modules' | 'team'>('clients');
+  const [feedback, setFeedback] = useState<Feedback[]>([]);
+  const [activeTab, setActiveTab] = useState<'clients' | 'quotes' | 'modules' | 'team' | 'feedback'>('clients');
   const [isAddingClient, setIsAddingClient] = useState(false);
   const [isAddingUser, setIsAddingUser] = useState(false);
   const [newClient, setNewClient] = useState({
@@ -154,6 +167,11 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
   });
   const [userError, setUserError] = useState<string | null>(null);
   const [isAddingUserLoading, setIsAddingUserLoading] = useState(false);
+  const [moduleFile, setModuleFile] = useState<File | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
 
   const BUNDLE_PRICE = 1595;
 
@@ -193,7 +211,14 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
       }, (err) => handleFirestoreError(err, OperationType.GET, 'users'));
     }
 
-    return () => { unsubClients(); unsubQuotes(); unsubModules(); unsubTeam(); };
+    let unsubFeedback = () => {};
+    if (userRole === 'admin') {
+      unsubFeedback = onSnapshot(collection(db, 'feedback'), (snapshot) => {
+        setFeedback(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Feedback)));
+      }, (err) => handleFirestoreError(err, OperationType.GET, 'feedback'));
+    }
+
+    return () => { unsubClients(); unsubQuotes(); unsubModules(); unsubTeam(); unsubFeedback(); };
   }, [userRole]);
 
   const handleAddClient = async (e: React.FormEvent) => {
@@ -288,35 +313,193 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
   const handleUpdateModule = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingModule) return;
+    setIsUploading(true);
+    setActionError(null);
+    setActionSuccess(null);
+
+    if (!auth.currentUser) {
+      setActionError("You must be logged in to perform this action.");
+      setIsUploading(false);
+      return;
+    }
+
+    // Safety timeout: reset uploading state after 5 minutes if it hangs
+    const timeout = setTimeout(() => {
+      setIsUploading(false);
+      setActionError("The request timed out. This may be due to a slow connection or a network issue. Please check your internet and try again.");
+      console.error("Upload timed out after 300s");
+    }, 300000);
+
     try {
-      await updateDoc(doc(db, 'modules', editingModule.id), { ...editingModule });
-      setEditingModule(null);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `modules/${editingModule.id}`);
+      if (moduleFile && moduleFile.size > 25 * 1024 * 1024) {
+        throw new Error("File is too large. Maximum size is 25MB.");
+      }
+
+      console.log("Starting module update for:", editingModule.id);
+      let pdfUrl = editingModule.pdfUrl || '';
+      
+      if (moduleFile) {
+        console.log("Uploading file:", moduleFile.name, "Size:", moduleFile.size);
+        setUploadProgress(0);
+
+        // Use a unique path for each upload
+        const fileRef = ref(storage, `modules/${editingModule.id}_${Date.now()}.pdf`);
+        
+        console.log("Starting uploadBytesResumable...");
+        const uploadTask = uploadBytesResumable(fileRef, moduleFile);
+        
+        await new Promise<void>((resolve, reject) => {
+          uploadTask.on('state_changed', 
+            (snapshot) => {
+              const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+              setUploadProgress(progress);
+              console.log('Upload is ' + progress + '% done');
+            }, 
+            (error) => {
+              console.error("Upload task error:", error);
+              reject(error);
+            }, 
+            () => resolve()
+          );
+        });
+        console.log("Upload completed successfully");
+
+        pdfUrl = await getDownloadURL(fileRef);
+        console.log("Download URL obtained:", pdfUrl);
+
+        // Delete old file if it exists (do this AFTER successful upload)
+        if (editingModule.pdfUrl && editingModule.pdfUrl.includes('firebasestorage.googleapis.com')) {
+          try {
+            console.log("Attempting to delete old PDF...");
+            const oldFileRef = ref(storage, editingModule.pdfUrl);
+            await deleteObject(oldFileRef);
+            console.log("Old PDF deleted successfully");
+          } catch (e) {
+            console.warn("Could not delete old PDF:", e);
+          }
+        }
+      }
+
+      const { id, ...updateData } = editingModule;
+      await updateDoc(doc(db, 'modules', id), { ...updateData, pdfUrl });
+      
+      clearTimeout(timeout);
+      setActionSuccess("Module updated successfully!");
+      
+      setTimeout(() => {
+        setEditingModule(null);
+        setModuleFile(null);
+        setActionSuccess(null);
+      }, 1000);
+
+    } catch (err: any) {
+      clearTimeout(timeout);
+      console.error("Detailed error in handleUpdateModule:", err);
+      setActionError(`Error: ${err.message || "Unknown error occurred"}`);
+    } finally {
+      setIsUploading(false);
     }
   };
 
   const handleAddModule = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsUploading(true);
+    setActionError(null);
+    setActionSuccess(null);
+
+    if (!auth.currentUser) {
+      setActionError("You must be logged in to perform this action.");
+      setIsUploading(false);
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      setIsUploading(false);
+      setActionError("The request timed out. This may be due to a slow connection or a network issue. Please check your internet and try again.");
+      console.error("Upload timed out after 300s");
+    }, 300000);
+
     try {
-      const moduleId = newModule.name.toLowerCase().replace(/\s+/g, '-');
-      await setDoc(doc(db, 'modules', moduleId), { ...newModule, id: moduleId });
-      setIsAddingModule(false);
-      setNewModule({
-        category: '',
-        name: '',
-        description: '',
-        monthlyCost: 0,
-        setupFee: 0,
-        isIncluded: false
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'modules');
+      if (moduleFile && moduleFile.size > 25 * 1024 * 1024) {
+        throw new Error("File is too large. Maximum size is 25MB.");
+      }
+
+      const moduleId = newModule.name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      if (!moduleId) throw new Error("Module name is invalid or empty");
+
+      console.log("Starting module creation for:", moduleId);
+      let pdfUrl = '';
+      
+      if (moduleFile) {
+        console.log("Uploading file:", moduleFile.name, "Size:", moduleFile.size);
+        setUploadProgress(0);
+        const fileRef = ref(storage, `modules/${moduleId}_${Date.now()}.pdf`);
+        
+        console.log("Starting uploadBytesResumable...");
+        const uploadTask = uploadBytesResumable(fileRef, moduleFile);
+        
+        await new Promise<void>((resolve, reject) => {
+          uploadTask.on('state_changed', 
+            (snapshot) => {
+              const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+              setUploadProgress(progress);
+              console.log('Upload is ' + progress + '% done');
+            }, 
+            (error) => {
+              console.error("Upload task error:", error);
+              reject(error);
+            }, 
+            () => resolve()
+          );
+        });
+        console.log("Upload completed successfully");
+
+        pdfUrl = await getDownloadURL(fileRef);
+        console.log("Download URL obtained:", pdfUrl);
+      }
+
+      await setDoc(doc(db, 'modules', moduleId), { ...newModule, id: moduleId, pdfUrl });
+
+      clearTimeout(timeout);
+      setActionSuccess("Module created successfully!");
+
+      setTimeout(() => {
+        setIsAddingModule(false);
+        setModuleFile(null);
+        setActionSuccess(null);
+        setNewModule({
+          category: '',
+          name: '',
+          description: '',
+          monthlyCost: 0,
+          setupFee: 0,
+          isIncluded: false
+        });
+      }, 1000);
+
+    } catch (err: any) {
+      clearTimeout(timeout);
+      console.error("Detailed error in handleAddModule:", err);
+      setActionError(`Error: ${err.message || "Unknown error occurred"}`);
+    } finally {
+      setIsUploading(false);
     }
   };
 
   const handleDeleteModule = async (moduleId: string) => {
     try {
+      const moduleDoc = await getDoc(doc(db, 'modules', moduleId));
+      const moduleData = moduleDoc.data() as ITRAKModule;
+      
+      if (moduleData?.pdfUrl) {
+        const fileRef = ref(storage, `modules/${moduleId}.pdf`);
+        try {
+          await deleteObject(fileRef);
+        } catch (e) {
+          console.warn("Could not delete PDF from storage (might already be gone):", e);
+        }
+      }
+      
       await deleteDoc(doc(db, 'modules', moduleId));
     } catch (err) {
       handleFirestoreError(err, OperationType.DELETE, `modules/${moduleId}`);
@@ -435,6 +618,16 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
               >
                 <ShieldCheck size={20} />
                 <span className="font-medium">Team</span>
+              </button>
+              <button 
+                onClick={() => setActiveTab('feedback')}
+                className={cn(
+                  "w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all",
+                  activeTab === 'feedback' ? "bg-teal-600 text-white" : "text-slate-400 hover:bg-slate-800 hover:text-white"
+                )}
+              >
+                <MessageSquare size={20} />
+                <span className="font-medium">Feedback</span>
               </button>
             </>
           )}
@@ -627,7 +820,12 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
                   <p className="text-slate-500">Adjust module names, descriptions, and pricing.</p>
                 </div>
                 <button 
-                  onClick={() => setIsAddingModule(true)}
+                  onClick={() => {
+                    setIsAddingModule(true);
+                    setModuleFile(null);
+                    setActionError(null);
+                    setActionSuccess(null);
+                  }}
                   className="bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 font-medium transition-all shadow-lg shadow-teal-600/20"
                 >
                   <Plus size={20} />
@@ -644,7 +842,12 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
                       </div>
                       <div className="flex gap-2">
                         <button 
-                          onClick={() => setEditingModule(module)}
+                          onClick={() => {
+                            setEditingModule(module);
+                            setModuleFile(null);
+                            setActionError(null);
+                            setActionSuccess(null);
+                          }}
                           className="text-teal-600 text-xs font-bold hover:underline"
                         >
                           Edit
@@ -665,11 +868,93 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
                     <h3 className="font-bold text-slate-900 mb-1">{module.name}</h3>
                     <p className="text-xs text-slate-500 mb-4 line-clamp-2">{module.description}</p>
                     <div className="flex justify-between items-center pt-4 border-t border-slate-50">
-                      <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Monthly Cost</span>
-                      <span className="font-mono font-bold text-teal-600">${module.monthlyCost}</span>
+                      <div className="flex flex-col">
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Monthly Cost</span>
+                        <span className="font-mono font-bold text-teal-600">${module.monthlyCost}</span>
+                      </div>
+                      {module.pdfUrl && (
+                        <a 
+                          href={module.pdfUrl} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="w-8 h-8 bg-slate-50 text-slate-400 hover:text-teal-600 hover:bg-teal-50 rounded-lg flex items-center justify-center transition-all"
+                          title="View PDF"
+                        >
+                          <FileDown size={18} />
+                        </a>
+                      )}
                     </div>
                   </div>
                 ))}
+              </div>
+            </motion.div>
+          ) : activeTab === 'feedback' ? (
+            <motion.div 
+              key="feedback"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="max-w-6xl mx-auto"
+            >
+              <div className="mb-8">
+                <h1 className="text-3xl font-bold text-slate-900">Client Feedback</h1>
+                <p className="text-slate-500">Direct insights and requests from clients viewing proposals.</p>
+              </div>
+
+              <div className="space-y-4">
+                {feedback.length === 0 ? (
+                  <div className="bg-white rounded-xl border border-slate-200 p-12 text-center">
+                    <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center text-slate-300 mx-auto mb-4">
+                      <MessageSquare size={32} />
+                    </div>
+                    <h3 className="text-lg font-bold text-slate-900 mb-1">No feedback yet</h3>
+                    <p className="text-slate-500">Feedback from clients will appear here once they submit it via the portal.</p>
+                  </div>
+                ) : (
+                  feedback.sort((a, b) => b.createdAt?.toMillis() - a.createdAt?.toMillis()).map(item => (
+                    <div key={item.id} className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+                      <div className="flex justify-between items-start mb-4">
+                        <div>
+                          <h3 className="font-bold text-slate-900">{item.clientName}</h3>
+                          <p className="text-xs text-slate-500">
+                            Quote ID: {item.quoteId} • {item.createdAt?.toDate().toLocaleString()}
+                          </p>
+                        </div>
+                        {item.rating && (
+                          <div className="flex gap-1">
+                            {[1, 2, 3, 4, 5].map(star => (
+                              <Star 
+                                key={star} 
+                                size={14} 
+                                className={star <= item.rating! ? "text-yellow-400 fill-yellow-400" : "text-slate-200"} 
+                              />
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div className="bg-slate-50 rounded-lg p-4 border border-slate-100">
+                        <p className="text-slate-700 text-sm leading-relaxed whitespace-pre-wrap">{item.message}</p>
+                      </div>
+                      <div className="mt-4 flex justify-end">
+                        <button 
+                          onClick={async () => {
+                            if (window.confirm("Delete this feedback?")) {
+                              try {
+                                await deleteDoc(doc(db, 'feedback', item.id));
+                              } catch (err) {
+                                handleFirestoreError(err, OperationType.DELETE, `feedback/${item.id}`);
+                              }
+                            }
+                          }}
+                          className="text-xs text-slate-400 hover:text-red-500 transition-colors flex items-center gap-1"
+                        >
+                          <Trash2 size={12} />
+                          Delete Feedback
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             </motion.div>
           ) : (
@@ -929,9 +1214,20 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
           >
             <div className="p-6 border-b border-slate-100 flex justify-between items-center">
               <h2 className="text-xl font-bold text-slate-900">Edit Module</h2>
-              <button onClick={() => setEditingModule(null)} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
+              <button onClick={() => { setEditingModule(null); setActionError(null); setModuleFile(null); }} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
             </div>
             <form onSubmit={handleUpdateModule} className="p-6 space-y-4">
+              {actionError && (
+                <div className="p-3 bg-red-50 border border-red-100 rounded-lg text-red-600 text-xs font-medium">
+                  {actionError}
+                </div>
+              )}
+              {actionSuccess && (
+                <div className="p-3 bg-teal-50 border border-teal-100 rounded-lg text-teal-600 text-xs font-medium flex items-center gap-2">
+                  <CheckCircle2 size={14} />
+                  {actionSuccess}
+                </div>
+              )}
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Module Name</label>
                 <input 
@@ -962,8 +1258,69 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
                   className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-teal-500 outline-none transition-all font-mono"
                 />
               </div>
-              <button type="submit" className="w-full py-3 bg-teal-600 text-white rounded-lg font-bold hover:bg-teal-700 transition-all shadow-lg shadow-teal-600/20 mt-4">
-                Update Module
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Information PDF (Optional)</label>
+                <div className="relative">
+                  <input 
+                    type="file" 
+                    accept=".pdf"
+                    onChange={e => setModuleFile(e.target.files?.[0] || null)}
+                    className="hidden"
+                    id="edit-module-pdf"
+                  />
+                  <label 
+                    htmlFor="edit-module-pdf"
+                    className="flex items-center justify-center gap-2 w-full px-4 py-3 bg-slate-50 border-2 border-dashed border-slate-200 rounded-xl cursor-pointer hover:bg-slate-100 transition-all"
+                  >
+                    <FileUp size={18} className="text-slate-400" />
+                    <span className="text-sm text-slate-600 font-medium truncate max-w-[200px]">
+                      {moduleFile ? moduleFile.name : (editingModule.pdfUrl ? 'Replace current PDF' : 'Upload PDF')}
+                    </span>
+                  </label>
+                  {editingModule.pdfUrl && !moduleFile && (
+                    <button 
+                      type="button"
+                      onClick={async () => {
+                        if (window.confirm("Are you sure you want to remove the PDF from this module?")) {
+                          try {
+                            const fileRef = ref(storage, editingModule.pdfUrl!);
+                            await deleteObject(fileRef);
+                            await updateDoc(doc(db, 'modules', editingModule.id), { pdfUrl: '' });
+                            setEditingModule({...editingModule, pdfUrl: ''});
+                            setActionSuccess("PDF removed successfully!");
+                            setTimeout(() => setActionSuccess(null), 2000);
+                          } catch (err: any) {
+                            setActionError(`Error removing PDF: ${err.message}`);
+                          }
+                        }
+                      }}
+                      className="absolute -top-2 -right-2 bg-red-100 text-red-600 p-1 rounded-full hover:bg-red-200 transition-colors shadow-sm"
+                      title="Remove PDF"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+                {editingModule.pdfUrl && !moduleFile && (
+                  <p className="text-[10px] text-teal-600 mt-1 font-medium flex items-center gap-1">
+                    <CheckCircle2 size={10} /> PDF already uploaded
+                  </p>
+                )}
+              </div>
+              <button 
+                disabled={isUploading}
+                type="submit" 
+                className="w-full py-3 bg-teal-600 text-white rounded-lg font-bold hover:bg-teal-700 transition-all shadow-lg shadow-teal-600/20 mt-4 disabled:opacity-50 relative overflow-hidden"
+              >
+                {isUploading && (
+                  <div 
+                    className="absolute inset-0 bg-teal-500/50 transition-all duration-300" 
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                )}
+                <span className="relative z-10">
+                  {isUploading ? `Uploading ${Math.round(uploadProgress)}%` : 'Update Module'}
+                </span>
               </button>
             </form>
           </motion.div>
@@ -980,9 +1337,20 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
           >
             <div className="p-6 border-b border-slate-100 flex justify-between items-center">
               <h2 className="text-xl font-bold text-slate-900">Add New Module</h2>
-              <button onClick={() => setIsAddingModule(false)} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
+              <button onClick={() => { setIsAddingModule(false); setActionError(null); setModuleFile(null); }} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
             </div>
             <form onSubmit={handleAddModule} className="p-6 space-y-4">
+              {actionError && (
+                <div className="p-3 bg-red-50 border border-red-100 rounded-lg text-red-600 text-xs font-medium">
+                  {actionError}
+                </div>
+              )}
+              {actionSuccess && (
+                <div className="p-3 bg-teal-50 border border-teal-100 rounded-lg text-teal-600 text-xs font-medium flex items-center gap-2">
+                  <CheckCircle2 size={14} />
+                  {actionSuccess}
+                </div>
+              )}
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Module Name</label>
                 <input 
@@ -1049,8 +1417,41 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
                   Always included in base package
                 </label>
               </div>
-              <button type="submit" className="w-full py-3 bg-teal-600 text-white rounded-lg font-bold hover:bg-teal-700 transition-all shadow-lg shadow-teal-600/20 mt-4">
-                Create Module
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Information PDF (Optional)</label>
+                <div className="relative">
+                  <input 
+                    type="file" 
+                    accept=".pdf"
+                    onChange={e => setModuleFile(e.target.files?.[0] || null)}
+                    className="hidden"
+                    id="add-module-pdf"
+                  />
+                  <label 
+                    htmlFor="add-module-pdf"
+                    className="flex items-center justify-center gap-2 w-full px-4 py-3 bg-slate-50 border-2 border-dashed border-slate-200 rounded-xl cursor-pointer hover:bg-slate-100 transition-all"
+                  >
+                    <FileUp size={18} className="text-slate-400" />
+                    <span className="text-sm text-slate-600 font-medium truncate max-w-[200px]">
+                      {moduleFile ? moduleFile.name : 'Upload PDF'}
+                    </span>
+                  </label>
+                </div>
+              </div>
+              <button 
+                disabled={isUploading}
+                type="submit" 
+                className="w-full py-3 bg-teal-600 text-white rounded-lg font-bold hover:bg-teal-700 transition-all shadow-lg shadow-teal-600/20 mt-4 disabled:opacity-50 relative overflow-hidden"
+              >
+                {isUploading && (
+                  <div 
+                    className="absolute inset-0 bg-teal-500/50 transition-all duration-300" 
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                )}
+                <span className="relative z-10">
+                  {isUploading ? `Uploading ${Math.round(uploadProgress)}%` : 'Create Module'}
+                </span>
               </button>
             </form>
           </motion.div>
@@ -1135,7 +1536,10 @@ const AdminDashboard = ({ user, userRole, onLogout }: { user: any, userRole: 'ad
                   </div>
                   <div>
                     <div className="flex justify-between items-start mb-1">
-                      <h4 className="font-bold text-slate-900 text-sm">{module.name}</h4>
+                      <h4 className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
+                        {module.name}
+                        {module.pdfUrl && <FileDown size={12} className="text-teal-500" title="PDF available" />}
+                      </h4>
                       <span className="text-xs font-mono font-bold text-teal-600">
                         {module.monthlyCost > 0 ? `$${module.monthlyCost}/mo` : (module.setupFee ? `$${module.setupFee} (One-time)` : 'Included')}
                       </span>
@@ -1176,9 +1580,14 @@ const ClientPortal = ({ quoteId }: { quoteId: string }) => {
   const [modules, setModules] = useState<ITRAKModule[]>([]);
   const [pin, setPin] = useState('');
   const [isUnlocked, setIsUnlocked] = useState(false);
-  const [activeTab, setActiveTab] = useState<'proposal' | 'roi' | 'insights'>('proposal');
+  const [activeTab, setActiveTab] = useState<'proposal' | 'roi' | 'insights' | 'feedback'>('proposal');
   const [loading, setLoading] = useState(true);
   const [selectedModuleIds, setSelectedModuleIds] = useState<string[]>([]);
+  
+  const [feedbackMessage, setFeedbackMessage] = useState('');
+  const [feedbackRating, setFeedbackRating] = useState(0);
+  const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
 
   const BUNDLE_PRICE = 1595;
 
@@ -1241,6 +1650,51 @@ const ClientPortal = ({ quoteId }: { quoteId: string }) => {
   const activateBundle = () => {
     const allModules = modules.filter(m => !m.isIncluded && m.monthlyCost > 0).map(m => m.id);
     setSelectedModuleIds(allModules);
+  };
+
+  const handleSubmitFeedback = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!feedbackMessage.trim()) return;
+    if (!client) return;
+    
+    setIsSubmittingFeedback(true);
+    try {
+      await addDoc(collection(db, 'feedback'), {
+        quoteId,
+        clientId: client.id,
+        clientName: client.hospitalName,
+        message: feedbackMessage,
+        rating: feedbackRating,
+        createdAt: Timestamp.now()
+      });
+      setFeedbackSubmitted(true);
+      setFeedbackMessage('');
+      setFeedbackRating(0);
+    } catch (err) {
+      console.error("Error submitting feedback:", err);
+      alert("Failed to submit feedback. Please try again.");
+    } finally {
+      setIsSubmittingFeedback(false);
+    }
+  };
+
+  const handleDownload = async (url: string, filename: string) => {
+    try {
+      const response = await fetch(url);
+      const blob = await response.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename.endsWith('.pdf') ? filename : `${filename}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (error) {
+      console.error('Download failed:', error);
+      // Fallback to opening in new tab if fetch fails
+      window.open(url, '_blank');
+    }
   };
 
   if (loading) return <div className="h-screen flex items-center justify-center bg-slate-900 text-white">Loading proposal...</div>;
@@ -1374,7 +1828,8 @@ const ClientPortal = ({ quoteId }: { quoteId: string }) => {
           {[
             { id: 'proposal', label: 'Module Overview', icon: FileText },
             { id: 'roi', label: 'Benefits & ROI', icon: BarChart3 },
-            { id: 'insights', label: 'Strategic Insights', icon: Info }
+            { id: 'insights', label: 'Strategic Insights', icon: Info },
+            { id: 'feedback', label: 'Feedback', icon: Send }
           ].map(tab => (
             <button
               key={tab.id}
@@ -1438,6 +1893,26 @@ const ClientPortal = ({ quoteId }: { quoteId: string }) => {
                               </span>
                             </div>
                             <p className="text-sm text-slate-500 leading-relaxed">{module.description}</p>
+                            {module.pdfUrl && (
+                              <div className="mt-3 flex gap-2" onClick={e => e.stopPropagation()}>
+                                <a 
+                                  href={module.pdfUrl} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer"
+                                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[10px] font-bold transition-all"
+                                >
+                                  <Eye size={12} />
+                                  View PDF
+                                </a>
+                                <button 
+                                  onClick={() => handleDownload(module.pdfUrl!, module.name)}
+                                  className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-100 hover:bg-teal-200 text-teal-700 rounded-lg text-[10px] font-bold transition-all"
+                                >
+                                  <Download size={12} />
+                                  Download
+                                </button>
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))}
@@ -1568,25 +2043,67 @@ const ClientPortal = ({ quoteId }: { quoteId: string }) => {
                 </div>
                 <div className="bg-white rounded-3xl border border-slate-200 p-8 shadow-sm">
                   <h3 className="text-xl font-bold text-slate-900 mb-8">Projected Operational Efficiency (12 Months)</h3>
-                  <div className="h-[250px]">
+                  <div className="h-[300px]">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={[
-                        { month: 'Jan', efficiency: 65, compliance: 70 },
-                        { month: 'Mar', efficiency: 72, compliance: 85 },
-                        { month: 'Jun', efficiency: 85, compliance: 95 },
-                        { month: 'Sep', efficiency: 92, compliance: 98 },
-                        { month: 'Dec', efficiency: 96, compliance: 100 },
-                      ]}>
+                      <BarChart 
+                        data={[
+                          { month: 'Month 1', efficiency: 65, compliance: 70 },
+                          { month: 'Month 3', efficiency: 72, compliance: 82 },
+                          { month: 'Month 6', efficiency: 85, compliance: 90 },
+                          { month: 'Month 9', efficiency: 92, compliance: 96 },
+                          { month: 'Month 12', efficiency: 98, compliance: 100 },
+                        ]}
+                        margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                      >
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                        <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
-                        <Tooltip 
-                          contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                        <XAxis 
+                          dataKey="month" 
+                          axisLine={false} 
+                          tickLine={false} 
+                          tick={{ fill: '#64748b', fontSize: 12, fontWeight: 500 }} 
+                          dy={10}
                         />
-                        <Bar dataKey="efficiency" name="Efficiency %" fill="#0d9488" radius={[4, 4, 0, 0]} />
-                        <Bar dataKey="compliance" name="Compliance %" fill="#0f172a" radius={[4, 4, 0, 0]} />
+                        <YAxis 
+                          axisLine={false} 
+                          tickLine={false} 
+                          tick={{ fill: '#64748b', fontSize: 12, fontWeight: 500 }} 
+                        />
+                        <Tooltip 
+                          cursor={{ fill: '#f8fafc' }}
+                          contentStyle={{ 
+                            borderRadius: '16px', 
+                            border: 'none', 
+                            boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)',
+                            padding: '12px'
+                          }}
+                        />
+                        <Legend 
+                          verticalAlign="top" 
+                          align="right" 
+                          iconType="circle"
+                          wrapperStyle={{ paddingBottom: '20px', fontSize: '12px', fontWeight: 600 }}
+                        />
+                        <Bar 
+                          dataKey="efficiency" 
+                          name="Efficiency %" 
+                          fill="#0d9488" 
+                          radius={[6, 6, 0, 0]} 
+                          barSize={32}
+                        />
+                        <Bar 
+                          dataKey="compliance" 
+                          name="Compliance %" 
+                          fill="#0f172a" 
+                          radius={[6, 6, 0, 0]} 
+                          barSize={32}
+                        />
                       </BarChart>
                     </ResponsiveContainer>
+                  </div>
+                  <div className="mt-6 p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      * Projections based on average ITRAK implementation results across similar facility sizes. Efficiency gains reflect reduced manual logging and automated reporting.
+                    </p>
                   </div>
                 </div>
               </div>
@@ -1672,6 +2189,97 @@ const ClientPortal = ({ quoteId }: { quoteId: string }) => {
                     ))}
                   </div>
                 </div>
+              </div>
+            </motion.div>
+          )}
+
+          {activeTab === 'feedback' && (
+            <motion.div
+              key="feedback"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="max-w-2xl mx-auto"
+            >
+              <div className="bg-white rounded-3xl border border-slate-200 p-8 shadow-sm">
+                <div className="text-center mb-8">
+                  <div className="w-16 h-16 bg-teal-50 rounded-2xl flex items-center justify-center text-teal-600 mx-auto mb-4">
+                    <Send size={32} />
+                  </div>
+                  <h3 className="text-2xl font-bold text-slate-900">Direct Feedback</h3>
+                  <p className="text-slate-500">Share your thoughts, questions, or requested adjustments to this proposal.</p>
+                </div>
+
+                {feedbackSubmitted ? (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className="bg-teal-50 border border-teal-100 rounded-2xl p-8 text-center"
+                  >
+                    <div className="w-12 h-12 bg-teal-500 text-white rounded-full flex items-center justify-center mx-auto mb-4">
+                      <CheckCircle2 size={24} />
+                    </div>
+                    <h4 className="text-lg font-bold text-slate-900 mb-2">Feedback Received!</h4>
+                    <p className="text-slate-600 mb-6">Thank you for your input. Our team will review your comments and get back to you shortly.</p>
+                    <button 
+                      onClick={() => setFeedbackSubmitted(false)}
+                      className="text-teal-600 font-bold hover:underline"
+                    >
+                      Send another message
+                    </button>
+                  </motion.div>
+                ) : (
+                  <form onSubmit={handleSubmitFeedback} className="space-y-6">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-2 tracking-wider">How would you rate this proposal?</label>
+                      <div className="flex gap-4">
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <button
+                            key={star}
+                            type="button"
+                            onClick={() => setFeedbackRating(star)}
+                            className={cn(
+                              "w-10 h-10 rounded-xl flex items-center justify-center transition-all",
+                              feedbackRating >= star ? "bg-teal-500 text-white shadow-lg shadow-teal-500/20" : "bg-slate-100 text-slate-400 hover:bg-slate-200"
+                            )}
+                          >
+                            <Star size={20} fill={feedbackRating >= star ? "currentColor" : "none"} />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-2 tracking-wider">Your Message</label>
+                      <textarea 
+                        required
+                        rows={6}
+                        value={feedbackMessage}
+                        onChange={e => setFeedbackMessage(e.target.value)}
+                        placeholder="Tell us what you think, any modules you'd like to add/remove, or any questions you have..."
+                        className="w-full px-4 py-3 rounded-2xl border border-slate-200 focus:ring-2 focus:ring-teal-500 outline-none transition-all text-sm leading-relaxed"
+                      />
+                    </div>
+
+                    <button 
+                      type="submit"
+                      disabled={isSubmittingFeedback || !feedbackMessage.trim()}
+                      className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold hover:bg-slate-800 transition-all shadow-xl disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {isSubmittingFeedback ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                          Sending...
+                        </>
+                      ) : (
+                        <>
+                          <Send size={18} />
+                          Submit Feedback
+                        </>
+                      )}
+                    </button>
+                  </form>
+                )}
               </div>
             </motion.div>
           )}
